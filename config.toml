@@ -1,0 +1,39 @@
+# NyYuketang 配置
+# 改完直接跑，不用重启
+
+[server]
+base_url = "https://changjiang.yuketang.cn"
+
+[browser]
+profile_dir = ".profile"      # 登录态存这里，扫一次就行
+headless = false              # 视频要真实渲染，保持 false
+channel = "msedge"            # 用系统 Edge，免下载 chromium；不行就改成 "chrome" 或 ""
+mobile = true                 # 模拟手机（页面是 lms-graph-mobile）
+slow_mo = 0
+
+[video]
+playback_rate = 1.0           # 先 1.0；确认不检测进度再调 1.25 / 1.5
+muted = true
+keepalive_seconds = 25        # 每隔多久检查一次并模拟活动
+max_wall_seconds = 5400       # 单节视频最长挂着多久（秒）
+turbo_seek = false            # true = 直接拖进度条（有小概率被判异常）
+turbo_step_seconds = 30
+finish_ratio = 0.99           # 进度到 99% 就算看完
+auto_next = true              # 看完自动点"下一节"
+
+[discussion]
+enabled = true
+min_len = 15                  # 抄来的讨论至少多少字
+max_len = 220
+max_candidates = 40
+avoid_keywords = ["老师", "助教", "官方", "置顶", "公告", "课程通知"]
+fallback_outline = true       # 没人发言就抄大纲里的句子
+dry_run = false               # true = 只打印不发送，先跑这个确认
+submit_wait_seconds = 8
+
+[catalog]
+expand_timeout_seconds = 6
+max_nodes = 300
+
+[paths]
+out_dir = "out"

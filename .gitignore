@@ -1,0 +1,18 @@
+# 登录态和浏览器数据
+.profile/
+login.json
+
+# 运行产物（答案、截图、日志）
+out/
+*.log
+plan.json
+
+# 本地状态（含 API Key、uid、课程缓存）
+state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
