@@ -15,7 +15,7 @@ import json
 import re
 import time
 
-from .ai import AI, AIError
+from .ai import AI, AIError, parse_json_loose
 from .browser import Session, goto
 
 SEL_ITEM = ".subject-item"
@@ -160,8 +160,7 @@ def read_problems(frame) -> list[dict]:
 
 
 SYSTEM = (
-    "你是考试辅助助手。你要读懂题目，给出可直接填写的答案。"
-    "把推理过程写清楚，让考生能自己判断。只输出 JSON。"
+    "你是答题助手。读懂题目，给出可以直接填写的答案，并简要说明依据。"
 )
 
 
@@ -213,26 +212,11 @@ def build_prompt(p: dict, exam_title: str = "") -> str:
 def ai_solve(ai: AI, p: dict, images: list[str] | None = None, timeout: int = 120,
              exam_title: str = "") -> dict:
     """让 AI 答一道题，返回 {answer, reason}。"""
-    raw = ai.chat(SYSTEM, build_prompt(p, exam_title), max_tokens=1200, timeout=timeout,
-                  images=images)
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        raise AIError(f"AI 没返回 JSON：{raw[:160]}")
-    body = m.group(0)
-    js = None
-    for cand in (
-        body,
-        re.sub(r"[\r\n]+", " ", body),
-        re.sub(r",\s*([}\]])", r"\1", body),
-        re.sub(r"[\r\n]+", " ", re.sub(r",\s*([}\]])", r"\1", body)),
-    ):
-        try:
-            js = json.loads(cand)
-            break
-        except Exception:
-            continue
+    raw = ai.chat(SYSTEM, build_prompt(p, exam_title), max_tokens=1200,
+                  timeout=timeout, images=images, json_mode=True)
+    js = parse_json_loose(raw, keys=("answer", "reason"))
     if js is None:
-        raise AIError(f"JSON 解析失败：{body[:160]}")
+        raise AIError(f"AI 没给出可用答案：{raw[:160]}")
 
     ans = str(js.get("answer") or "").strip()
     if p["kind"] in ("single", "multi"):

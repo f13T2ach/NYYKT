@@ -13,7 +13,7 @@ import threading
 import time
 
 from . import ocr as ocr_mod
-from .ai import AI, AIError
+from .ai import AI, AIError, parse_json_loose
 from .browser import Session, goto
 
 PROBLEM_SEL = ".container-problem"
@@ -687,25 +687,10 @@ def ai_answer(ai: AI, text: str) -> dict:
 请解析题目并作答。只输出 JSON：
 {{"type":"单选题/多选题/判断题/填空题/简答题","body":"题干","options":{{"A":"...","B":"..."}},"answer":"A,C","reason":"一句话理由"}}
 多选题答案按字母序逗号分隔；填空/简答直接用文字作答。"""
-    raw = ai.chat("你是答题助手，只输出 JSON，不要解释。", prompt, max_tokens=1200, timeout=120)
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        raise AIError(f"AI 没返回 JSON：{raw[:200]}")
-    body = m.group(0)
-    js = None
-    for candidate in (
-        body,
-        re.sub(r"[\r\n]+", " ", body),                 # 去换行
-        re.sub(r",\s*([}\]])", r"\1", body),           # 去尾逗号
-        re.sub(r"[\r\n]+", " ", re.sub(r",\s*([}\]])", r"\1", body)),
-    ):
-        try:
-            js = json.loads(candidate)
-            break
-        except Exception:
-            continue
+    raw = ai.chat("你是答题助手。", prompt, max_tokens=1200, timeout=120, json_mode=True)
+    js = parse_json_loose(raw, keys=("answer", "reason", "type", "body", "options"))
     if js is None:
-        raise AIError(f"AI 返回的 JSON 解析不了：{body[:160]}")
+        raise AIError(f"AI 没给出可用答案：{raw[:200]}")
     ans = js.get("answer") or ""
     letters = [x.strip().upper() for x in re.split(r"[,\s，、]+", str(ans)) if x.strip()]
     letters = [x for x in letters if re.fullmatch(r"[A-H]", x)]

@@ -6,6 +6,7 @@ Key 只从 state.json 读，绝不写进代码。
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -35,6 +36,15 @@ DEFAULT = {
 STYLE_FALLBACK = (
     "注意：不要调整语气强度，保持克制、学术化的表达。"
     "避免口语化、情绪化和网络用语，结论要有依据。"
+)
+
+# 要求结构化输出时统一挂在 system 后面。措辞要硬：模型很容易先来一句
+# "好的，这是答案" 再给 JSON，那层壳会让解析器找不到花括号。
+STRICT_JSON = (
+    "输出格式是硬性要求：你的整条回复必须且只能是一个 JSON 对象。"
+    "第一个字符必须是 {，最后一个字符必须是 }。"
+    "不要输出任何前言、结语、解释、Markdown 代码块、反引号或额外空白。"
+    "即使不确定答案，也要按同样的 JSON 结构给出，不要改用文字说明。"
 )
 
 # 模型名里出现这些就认为能吃图
@@ -125,11 +135,13 @@ class AI:
 
     def chat(self, system: str, user: str, max_tokens: int = 900,
              timeout: int = 90, images: list[str] | None = None,
-             temperature: float | None = None) -> str:
+             temperature: float | None = None, json_mode: bool = False) -> str:
         """images 是 PNG 的 base64 字符串列表（不带 data: 前缀）。
 
         temperature 传了就用它，否则用配置值。模型不接受这个参数时，
         自动去掉重试，并往系统提示里补一句风格约束来等价控制。
+        json_mode=True 时追加 STRICT_JSON，并在 OpenAI 协议下带
+        response_format，让服务端强制出 JSON。
         """
         if not self.usable:
             raise AIError("AI 未启用或缺少 API Key")
@@ -139,8 +151,10 @@ class AI:
 
         temp = self.temperature if temperature is None else float(temperature)
         system_use = system
+        if json_mode:
+            system_use = f"{system}\n\n{STRICT_JSON}"
         if self.extra_prompt:
-            system_use = f"{system}\n\n{self.extra_prompt}"
+            system_use = f"{system_use}\n\n{self.extra_prompt}"
 
         if self.protocol == "anthropic":
             content: list[dict] = [{"type": "text", "text": user}]
@@ -185,6 +199,8 @@ class AI:
             "max_tokens": max_tokens,
             "messages": messages,
         }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
         js = self._post("/chat/completions", body,
                         {"Authorization": f"Bearer {self.api_key}"}, timeout,
                         _retry_no_temp=messages, _system=system_use, _timeout=timeout)
@@ -235,6 +251,68 @@ class AI:
 
 
 # ---------------------------------------------------------------- 任务封装
+
+def parse_json_loose(raw: str, keys: tuple[str, ...] = ("answer",)) -> dict | None:
+    """尽量从任意回复里挖出一个 JSON 对象。
+
+    模型偶尔会先寒暄一句再给 JSON，或者干脆只给一段话。这里按
+    从严格到宽松的顺序试，最后再从纯文本里抠 key: value。
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+
+    # 去掉 ```json ... ``` 包裹
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
+    if fence:
+        text = fence.group(1).strip()
+
+    # 1) 整段就是一个对象
+    for cand in (text, re.sub(r"[\r\n]+", " ", text)):
+        try:
+            js = json.loads(cand)
+            if isinstance(js, dict):
+                return js
+        except Exception:
+            pass
+
+    # 2) 抠最外层花括号（贪心，取最长的匹配）
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        body = m.group(0)
+        for cand in (body,
+                     re.sub(r"[\r\n]+", " ", body),
+                     re.sub(r",\s*([}\]])", r"\1", body),
+                     re.sub(r"[\r\n]+", " ", re.sub(r",\s*([}\]])", r"\1", body))):
+            try:
+                js = json.loads(cand)
+                if isinstance(js, dict):
+                    return js
+            except Exception:
+                continue
+
+    # 3) 从纯文本里抠 "answer": "..." 或「答案：A」这种
+    out: dict = {}
+    aliases = {
+        "answer": ("answer", "答案", "正确选项", "正确答", "选项", "选择"),
+        "reason": ("reason", "理由", "解析", "分析"),
+    }
+    for k in keys:
+        names = aliases.get(k, (k,))
+        for nm in names:
+            mm = re.search(rf'{nm}\s*[:：]?\s*([^\n，。；]{{1,200}})', text, re.I)
+            if mm:
+                v = mm.group(1).strip().strip('"\'.,;:，。；')
+                if v:
+                    out[k] = v
+                    break
+    if out:
+        rm = re.search(r'(?:reason|理由|解析|分析)\s*[:：]\s*(.{0,300})', text, re.I)
+        if rm and "reason" not in out:
+            out["reason"] = rm.group(1).strip()
+        return out
+    return None
+
 
 DISC_SYSTEM = (
     "你是一名大学课堂上的学生。你正在雨课堂的课程讨论区发言。"
