@@ -2097,6 +2097,7 @@ class App:
             try:
                 with locked_session(self.cfg, self._pw_lock, headless=True, mobile=True) as s:
                     api = Api(s.ctx, self.cfg)
+                    page = s.page()          # 探测时长要用
                     disc_auto = bool(self.state["discussion"]["auto"])
                     strategy = self.state["discussion"]["strategy"]
                     posted = self._load_posted()
@@ -2127,7 +2128,7 @@ class App:
                                                          {"phase": "pace", **t}),
                                                      cancel=cancel)
                             else:
-                                r = boost_leaf(api, ids, leaf)
+                                r = boost_leaf(api, ids, leaf, page=page)
                         except Exception as e:
                             r = {"ok": False, "reason": f"异常: {e}"}
                         self._task_prog = {"total": total, "idx": i, "label": leaf.name}

@@ -152,20 +152,26 @@ def make_beat(ids: CourseIds, leaf_id: int, ccid: str, cp: float, fp: float,
 
 def build_beats(ids: CourseIds, leaf_id: int, ccid: str, vlen: float,
                 passes: int = 2, step: float | None = None) -> list[dict]:
-    # 长视频自动放大步长，保证每次请求 80 条上下，不至于撑爆
+    """构造心跳批次。
+
+    实测（2026-11）服务端只认 et="heartbeat" 的记账：playing 只报位置，tp 恒为 0，
+    真正累加 watch_length 的是 heartbeat，且按 ts 差值计算——所以 ts 可以按
+    5 秒一条递增，请求瞬间发完即可，不必真的等。
+    """
     if step is None:
-        step = max(20.0, vlen / 40.0)
+        step = 5.0                      # 服务端真实播放时也是 5 秒一条
     pg = f"{leaf_id}_{_rand_tag()}"
     t = int(time.time() * 1000)
     beats: list[dict] = []
     sq = 1
-    beats.append(make_beat(ids, leaf_id, ccid, 0, 0, 0, 0, "loadstart", sq, t, pg)); sq += 1
-    beats.append(make_beat(ids, leaf_id, ccid, 0, 0, 0, 0, "loadeddata", sq, t + 300, pg)); sq += 1
+    beats.append(make_beat(ids, leaf_id, ccid, 0, 0, 0, vlen, "loadstart", sq, t, pg)); sq += 1
+    beats.append(make_beat(ids, leaf_id, ccid, 0, 0, 0, vlen, "loadeddata", sq, t + 300, pg)); sq += 1
+    t += 1000
     for _ in range(max(1, passes)):
         cp = 0.0
         while cp < vlen:
             nxt = min(cp + step, vlen)
-            beats.append(make_beat(ids, leaf_id, ccid, nxt, cp, nxt, nxt - cp, "playing", sq, t, pg))
+            beats.append(make_beat(ids, leaf_id, ccid, nxt, 0, 0, vlen, "heartbeat", sq, t, pg))
             sq += 1
             t += int(step * 1000)
             cp = nxt
@@ -324,8 +330,28 @@ def boost_leaf_paced(
     return res
 
 
+def probe_duration_from_page(page, classroom_id, leaf_id) -> float:
+    """有些视频 leaf_info 里 duration=0，只能打开页面问 <video>。"""
+    try:
+        url = (f"https://changjiang.yuketang.cn/ai-workspace/lms-graph-mobile/"
+               f"{classroom_id}/video/{leaf_id}")
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        for _ in range(8):
+            page.wait_for_timeout(1200)
+            d = page.evaluate("""() => {
+                const v = document.querySelector('video');
+                return v && isFinite(v.duration) ? v.duration : 0;
+            }""")
+            if d and float(d) > 0:
+                return float(d)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def boost_leaf(api: Api, ids: CourseIds, leaf: Leaf, max_rounds: int = 4,
-               sleep_between: float = 1.2, verify: bool = True) -> dict:
+               sleep_between: float = 1.2, verify: bool = True,
+               page=None) -> dict:
     """把一个 leaf 刷到 completed=1。"""
     res = {"leaf_id": leaf.leaf_id, "name": leaf.name, "ok": False,
            "rounds": 0, "detail": {}, "reason": ""}
@@ -354,6 +380,14 @@ def boost_leaf(api: Api, ids: CourseIds, leaf: Leaf, max_rounds: int = 4,
         st = progress_of(api, ids, leaf.leaf_id)
         vlen = float(st.get("video_length") or 0)
 
+    # 有些视频 leaf_info 的 duration 就是 0，预热也不给，只能开页面问 <video>
+    if vlen <= 0 and page is not None:
+        d = probe_duration_from_page(page, ids.classroom_id, leaf.leaf_id)
+        if d > 0:
+            vlen = d
+            leaf.duration = d
+            res["detail"]["probed_from_page"] = d
+
     if vlen <= 0:
         res["reason"] = "服务端没给出视频时长（预热后仍为 0）"
         return res
@@ -365,16 +399,26 @@ def boost_leaf(api: Api, ids: CourseIds, leaf: Leaf, max_rounds: int = 4,
 
     for rnd in range(1, max_rounds + 1):
         res["rounds"] = rnd
-        beats = build_beats(ids, leaf.leaf_id, leaf.ccid, vlen, passes=2)
-        r = api.heartbeat(beats)
-        bad = ""
-        if not r.get("ok"):
-            bad = f"HTTP {r.get('http')}"
-        elif isinstance(r.get("json"), dict) and r["json"].get("message"):
-            bad = str(r["json"].get("message"))
+        beats = build_beats(ids, leaf.leaf_id, leaf.ccid, vlen, passes=1)
+        # 长视频会生成上百条，分批发，别一次塞爆
+        chunk = 80
+        sent = 0
+        for i in range(0, len(beats), chunk):
+            part = beats[i:i + chunk]
+            r = api.heartbeat(part)
+            sent += len(part)
+            if not r.get("ok"):
+                res["detail"]["bad_http"] = r.get("http")
+                break
+            js = r.get("json")
+            if isinstance(js, dict) and js.get("message"):
+                res["detail"]["bad_msg"] = str(js.get("message"))
+                break
+            if i + chunk < len(beats):
+                time.sleep(0.4)
 
         if not verify:
-            res.update(ok=True, reason="已上报（未校验）", detail={"beats": len(beats)})
+            res.update(ok=True, reason="已上报（未校验）", detail={"beats": sent})
             return res
 
         time.sleep(sleep_between)
