@@ -1251,14 +1251,29 @@ class App:
                         try:
                             text = cd.ai_write(ai, body)
                             r = cd.publish(api, int(classroom), t, text)
-                            ok = (r.get("http") == 200
-                                  and '"code": 0' in (r.get("text") or "").replace(" ", ""))
+                            ok, why = cd.verdict(r)
+
+                            # 被内容审核拦了：换个写法重试，最多两次
+                            tries = 0
+                            while not ok and cd.is_audit_reject(why) and tries < 2:
+                                tries += 1
+                                if cancel.is_set():
+                                    break
+                                self.log(f"  [{i}/{len(topics)}] 被审核拦下，改写重试 {tries}/2", C_DIM)
+                                try:
+                                    text = cd.ai_write_safe(ai, body, tries=2)
+                                except Exception as e:
+                                    self.log(f"    重写失败：{e}", C_WARN)
+                                    break
+                                r = cd.publish(api, int(classroom), t, text)
+                                ok, why = cd.verdict(r)
+
                             if ok:
                                 done += 1
                                 self.log(f"  [{i}/{len(topics)}] 已发表 {len(text)} 字：{text[:28]}…", C_OK)
                             else:
                                 failed += 1
-                                self.log(f"  [{i}/{len(topics)}] 失败 {(r.get('text') or '')[:100]}", C_WARN)
+                                self.log(f"  [{i}/{len(topics)}] 失败：{why}", C_WARN)
                         except Exception as e:
                             failed += 1
                             self.log(f"  [{i}/{len(topics)}] 出错：{e}", C_WARN)

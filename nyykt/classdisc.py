@@ -195,3 +195,61 @@ def publish(api: Api, classroom: int, topic: dict, text: str) -> dict:
         headers={"content-type": "application/json;charset=UTF-8"},
         referer=referer,
     )
+
+
+def verdict(r: dict) -> tuple[bool, str]:
+    """把服务端返回翻成 (成功?, 人话原因)。"""
+    if not r.get("ok"):
+        return False, f"HTTP {r.get('http')}"
+
+    js = r.get("json")
+    if not isinstance(js, dict):
+        # 拿不到 JSON 就退回看文本里有没有 code:0
+        txt = (r.get("text") or "").replace(" ", "")
+        return ('"code":0' in txt), (r.get("text") or "")[:150]
+
+    code = js.get("code")
+    msg = str(js.get("msg") or js.get("message") or "")
+    if code in (0, "0") or js.get("success") is True:
+        return True, "已发表"
+
+    # 服务端把中文转义成 \uXXXX，先还原再展示
+    try:
+        msg = msg.encode("utf-8").decode("unicode_escape").encode("latin1").decode("utf-8")
+    except Exception:
+        pass
+    if not msg:
+        msg = str(js)[:150]
+    return False, msg
+
+
+def is_audit_reject(msg: str) -> bool:
+    """是不是被内容审核拦了（换措辞重写可能能过）。"""
+    return any(k in (msg or "") for k in ("不合法", "违规", "敏感", "请修改后重试"))
+
+
+# 被审核拦下时，重写要求加这段
+RETRY_HINT = (
+    "\n\n补充要求：上一版被平台的自动审核拦下了。"
+    "请换一种写法：只用平实的事实陈述和自己身边的具体小事，"
+    "不要引用政策文件、法律条文原文，不要评价任何机构或制度，"
+    "不要出现宏大叙事和口号，把篇幅控制在一段之内。"
+)
+
+
+def ai_write_safe(ai: AI, topic_text: str, title: str = "", timeout: int = 120,
+                  temperature: float = 0.3, tries: int = 3,
+                  on_try=None) -> str:
+    """生成一条尽量能过的评论。被审核拦下时按提示重写。"""
+    text = ai_write(ai, topic_text, title, timeout, temperature)
+    for i in range(1, tries):
+        if on_try:
+            on_try(i, text)
+        try:
+            text = ai.chat(SYSTEM, build_prompt(topic_text, title) + RETRY_HINT,
+                           max_tokens=1000, timeout=timeout,
+                           temperature=temperature)
+            text = sanitize(text)
+        except Exception:
+            break
+    return text
